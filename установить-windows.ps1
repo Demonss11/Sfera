@@ -164,11 +164,24 @@ if (Test-Path $llvmConfigПуть) {
     }
 
     if (-not (Test-Path $llvmConfigПуть)) {
+        # НОВОЕ (найдено реальной проверкой на Windows): архивы vovkos
+        # распаковываются с ДОПОЛНИТЕЛЬНОЙ вложенной папкой
+        # ("llvm-18.1.8-windows-amd64-...") — находим её и поднимаем
+        # содержимое наверх, чтобы bin\llvm-config.exe оказался прямо в
+        # $ПапкаLLVM (как и ожидает остальная часть скрипта).
+        $найденный = Get-ChildItem $ПапкаLLVM -Recurse -Filter "llvm-config.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($найденный) {
+            $вложенная = $найденный.Directory.Parent.FullName
+            Get-ChildItem $вложенная | ForEach-Object { Move-Item $_.FullName -Destination $ПапкаLLVM -Force }
+            Remove-Item $вложенная -Recurse -Force
+        }
+    }
+
+    if (-not (Test-Path $llvmConfigПуть)) {
         Написать-Ошибку @"
 После распаковки не найден llvm-config.exe по ожидаемому пути:
   $llvmConfigПуть
-Возможно, архив распаковался с дополнительной вложенной папкой —
-проверь содержимое $ПапкаLLVM вручную и, если нужно, перемести файлы
+Проверь содержимое $ПапкаLLVM вручную и, если нужно, перемести файлы
 так, чтобы bin\llvm-config.exe оказался прямо внутри $ПапкаLLVM.
 "@
         exit 1
@@ -181,6 +194,72 @@ if (Test-Path $llvmConfigПуть) {
 # запусках, из обычного, нового окна PowerShell.
 [Environment]::SetEnvironmentVariable("LLVM_SYS_180_PREFIX", $ПапкаLLVM, "User")
 $env:LLVM_SYS_180_PREFIX = $ПапкаLLVM
+
+# ---------------------------------------------------------------------------
+# Шаг 3.5: Clang 18 — нужен САМОМУ компилятору «Сферы» для финальной
+# линковки программ (см. src/main.rs, слинковать_исполняемый_файл). Пакет
+# LLVM выше его НЕ содержит — это отдельный релиз vovkos ("clang-18.1.8").
+# ---------------------------------------------------------------------------
+Написать-Шаг "Проверяю Clang 18"
+
+$ПапкаClang = Join-Path $ПапкаСферы "Clang"
+$clangExe = Join-Path $ПапкаClang "bin\clang.exe"
+if (Test-Path $clangExe) {
+    Написать-Успех "Clang уже установлен в $ПапкаClang"
+} else {
+    # 7-Zip может быть ещё не скачан, если шаг LLVM был пропущен (LLVM уже
+    # стоял) — гарантируем его наличие самостоятельно.
+    $семьЗип = Join-Path $ПапкаВременная "7za.exe"
+    if (-not (Test-Path $семьЗип)) {
+        Написать-Шаг "Скачиваю портативный 7-Zip (нужен для распаковки .7z)"
+        Invoke-WebRequest -Uri "https://www.7-zip.org/a/7zr.exe" -OutFile $семьЗип
+    }
+
+    Написать-Шаг "Скачиваю Clang 18.1.8 (~230 МБ — может занять время)"
+    $релизClang = Invoke-RestMethod -Uri "https://api.github.com/repos/vovkos/llvm-package-windows/releases/tags/clang-18.1.8"
+    # msvcrt (динамический CRT), НЕ dbg — совпадает с CRT обычной release-
+    # сборки компилятора на Rust, и не тянет отладочные библиотеки.
+    $активClang = $релизClang.assets | Where-Object {
+        $_.name -match "windows" -and $_.name -match "(amd64|x64)" -and
+        $_.name -match "msvcrt" -and $_.name -notmatch "dbg"
+    } | Select-Object -First 1
+
+    if (-not $активClang) {
+        Написать-Ошибку @"
+Не удалось автоматически найти нужный файл Clang в релизе GitHub.
+Скачай вручную с https://github.com/vovkos/llvm-package-windows/releases/tag/clang-18.1.8
+— файл для Windows amd64/x64 с MSVC (msvcrt, не dbg, расширение .7z) —
+распакуй в:
+  $ПапкаClang
+так, чтобы получилось $ПапкаClang\bin\clang.exe, и запусти скрипт заново.
+"@
+        exit 1
+    }
+
+    $архивClang = Join-Path $ПапкаВременная $активClang.name
+    Написать-Шаг "Найден файл: $($активClang.name) — скачиваю..."
+    Invoke-WebRequest -Uri $активClang.browser_download_url -OutFile $архивClang
+
+    Написать-Шаг "Распаковываю Clang в $ПапкаClang"
+    New-Item -ItemType Directory -Force -Path $ПапкаClang | Out-Null
+    & $семьЗип x $архивClang "-o$ПапкаClang" -y | Out-Null
+
+    # Тот же случай вложенной папки, что и у LLVM — поднимаем содержимое.
+    if (-not (Test-Path $clangExe)) {
+        $найденныйClang = Get-ChildItem $ПапкаClang -Recurse -Filter "clang.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($найденныйClang) {
+            $вложеннаяClang = $найденныйClang.Directory.Parent.FullName
+            Get-ChildItem $вложеннаяClang | ForEach-Object { Move-Item $_.FullName -Destination $ПапкаClang -Force }
+            Remove-Item $вложеннаяClang -Recurse -Force
+        }
+    }
+
+    if (-not (Test-Path $clangExe)) {
+        Написать-Ошибку "После распаковки не найден $clangExe — проверь $ПапкаClang вручную."
+        exit 1
+    }
+    Написать-Успех "Clang установлен в $ПапкаClang"
+}
 
 # ---------------------------------------------------------------------------
 # Шаг 4: исходники компилятора — если скрипт запущен внутри уже
@@ -247,19 +326,41 @@ New-Item -ItemType Directory -Force -Path (Split-Path $ПапкаСистемн�
 Copy-Item (Join-Path $ПапкаПроекта "стандартная_библиотека") $ПапкаСистемнойБиблиотеки -Recurse -Force
 Написать-Успех "Стандартная библиотека установлена — доступна из любого проекта без копирования файлов."
 
+# НОВОЕ (Windows): слой совместимости pthread поверх Win32 — сгенерированный
+# код «Сферы» всегда обращается к pthread_*, которых в Windows нет. Лежит
+# рядом с системной стандартной библиотекой, компилятор находит и
+# подключает его автоматически при линковке (см. src/main.rs,
+# найти_шим_совместимости).
+$ПапкаСовместимости = Join-Path $ПапкаСферы "lib\sfera\совместимость"
+Написать-Шаг "Копирую слой совместимости Windows в $ПапкаСовместимости"
+if (Test-Path $ПапкаСовместимости) {
+    Remove-Item $ПапкаСовместимости -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path (Split-Path $ПапкаСовместимости -Parent) | Out-Null
+Copy-Item (Join-Path $ПапкаПроекта "совместимость") $ПапкаСовместимости -Recurse -Force
+Написать-Успех "Слой совместимости Windows установлен."
+
 # ---------------------------------------------------------------------------
 # Шаг 6: добавляем команду "запустить" в PATH пользователя
 # ---------------------------------------------------------------------------
-Написать-Шаг "Добавляю команду 'запустить' в PATH"
+Написать-Шаг "Добавляю команду 'запустить' и Clang в PATH"
 
+$ПапкаClangBin = Join-Path $ПапкаClang "bin"
 $текущийPATH = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($текущийPATH -notlike "*$ПапкаBin*") {
-    [Environment]::SetEnvironmentVariable("Path", "$текущийPATH;$ПапкаBin", "User")
+$нужноОбновить = $false
+foreach ($папка in @($ПапкаBin, $ПапкаClangBin)) {
+    if ($текущийPATH -notlike "*$папка*" -and $env:Path -notlike "*$папка*") {
+        $текущийPATH = "$текущийPATH;$папка"
+        $нужноОбновить = $true
+    }
+}
+if ($нужноОбновить) {
+    [Environment]::SetEnvironmentVariable("Path", $текущийPATH, "User")
     Написать-Успех "PATH обновлён (потребуется открыть НОВОЕ окно PowerShell, чтобы изменение подействовало)."
 } else {
-    Написать-Успех "PATH уже содержит нужную папку."
+    Написать-Успех "PATH уже содержит нужные папки."
 }
-$env:Path = "$env:Path;$ПапкаBin"
+$env:Path = "$env:Path;$ПапкаBin;$ПапкаClangBin"
 
 # ---------------------------------------------------------------------------
 # Шаг 7: проверка — компилируем и запускаем "привет.код"

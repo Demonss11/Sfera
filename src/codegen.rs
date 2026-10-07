@@ -2269,29 +2269,44 @@ impl<'ctx> Кодогенератор<'ctx> {
                 // смысл генерировать код — тот же aarch64 (сам
                 // существующий на устройстве процессор) — используем
                 // узкую, единственно доступную initialize_aarch64.
-                if cfg!(target_os = "android") {
-                    Target::initialize_aarch64(&InitializationConfig::default());
-                } else if тройка.starts_with("aarch64") {
-                    // НОВОЕ: НАЙДЕНО РЕАЛЬНОЙ ПРОВЕРКОЙ (теперь на Windows) —
-                    // тот же класс бага, что и выше для Android: "initialize_all"
-                    // требует, чтобы АБСОЛЮТНО ВСЕ таргеты LLVM (включая
-                    // редкие — WebAssembly, BPF, Hexagon и т.п.) были реально
-                    // скомпилированы в связанную LLVM. Готовый пакет LLVM для
-                    // Windows (vovkos/llvm-package-windows) часть таких редких
-                    // таргетов не включает — на линковке компилятора это
-                    // вываливается десятками unresolved external symbol для
-                    // функций вроде LLVMInitializeWebAssemblyAsmPrinter, хотя
-                    // WebAssembly нам никогда не был нужен. Единственная
-                    // реально используемая кросс-платформа — aarch64 (Android,
-                    // Linux ARM64) — инициализируем именно её, а не весь список.
-                    Target::initialize_aarch64(&InitializationConfig::default());
-                } else {
-                    // Инициализируем ВСЕ платформы, которые умеет LLVM — только
-                    // для действительно незнакомой целевой тройки (не aarch64).
-                    // На сборках LLVM, где не все таргеты скомпилированы (как
-                    // описано выше), эта ветка может столкнуться с той же
-                    // проблемой — тройка здесь честно экзотическая, не входит
-                    // в документированные кросс-платформы проекта.
+                // ⚠️ НАЙДЕНО РЕАЛЬНОЙ ПРОВЕРКОЙ (сборка на Windows): набор
+                // доступных инициализаторов целиком определяется тем, какие
+                // таргеты содержит ПАКЕТ LLVM, а он разный на разных ОС. На
+                // Windows (vovkos/llvm-package-windows) — только X86: в
+                // Cargo.toml для Windows inkwell подключается БЕЗ фичи
+                // "target-all", поэтому метода initialize_aarch64 там просто
+                // НЕТ, и вызывать его нельзя даже теоретически. Поэтому
+                // ветки ниже разделены атрибутами cfg по платформе самого
+                // компилятора, а не только по целевой тройке.
+                #[cfg(target_os = "android")]
+                Target::initialize_aarch64(&InitializationConfig::default());
+
+                #[cfg(all(not(target_os = "android"), not(target_os = "windows")))]
+                {
+                    // Единственная реально используемая кросс-платформа —
+                    // aarch64 (Android, Linux ARM64); для действительно
+                    // незнакомой тройки — все платформы, которые умеет LLVM.
+                    if тройка.starts_with("aarch64") {
+                        Target::initialize_aarch64(&InitializationConfig::default());
+                    } else {
+                        Target::initialize_all(&InitializationConfig::default());
+                    }
+                }
+
+                #[cfg(all(not(target_os = "android"), target_os = "windows"))]
+                {
+                    // X86-only-пакет: под aarch64/arm сгенерировать код нечем —
+                    // честно сообщаем об этом, вместо непонятной ошибки ниже.
+                    if тройка.starts_with("aarch64") || тройка.starts_with("arm") {
+                        return Err(ошибка(format!(
+                            "сборка LLVM для Windows содержит только таргет X86 \
+                             и не может генерировать код под '{}'",
+                            тройка
+                        )));
+                    }
+                    // "initialize_all" на X86-only-пакете безопасен: обёртка
+                    // LLVM_InitializeAllTargets разворачивается через заголовок
+                    // llvm/Config/Targets.def, где перечислен ровно один X86.
                     Target::initialize_all(&InitializationConfig::default());
                 }
                 let triple = inkwell::targets::TargetTriple::create(тройка);
@@ -2311,12 +2326,15 @@ impl<'ctx> Кодогенератор<'ctx> {
                 // (Cargo.toml, "disable-alltargets-init") — обе ветки должны
                 // одинаково не зависеть от него, иначе отключение этого файла
                 // сломало бы именно эту ветку вместо предыдущей.
-                if cfg!(target_os = "android") {
-                    Target::initialize_aarch64(&InitializationConfig::default());
-                } else {
-                    Target::initialize_native(&InitializationConfig::default())
-                        .map_err(|e| ошибка(format!("не удалось инициализировать целевую платформу LLVM: {}", e)))?;
-                }
+                // То же разделение по платформе, что и выше: initialize_aarch64
+                // существует только там, где включена фича inkwell target-aarch64
+                // (везде, кроме Windows).
+                #[cfg(target_os = "android")]
+                Target::initialize_aarch64(&InitializationConfig::default());
+
+                #[cfg(not(target_os = "android"))]
+                Target::initialize_native(&InitializationConfig::default())
+                    .map_err(|e| ошибка(format!("не удалось инициализировать целевую платформу LLVM: {}", e)))?;
                 let triple = TargetMachine::get_default_triple();
                 let cpu = TargetMachine::get_host_cpu_name().to_string();
                 let features = TargetMachine::get_host_cpu_features().to_string();

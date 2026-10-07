@@ -13,8 +13,18 @@ path = "src/main.rs"
 # ВАЖНО: помимо этой Rust-зависимости, на компьютере должен быть физически
 # установлен сам LLVM версии 18 (это внешний, системный компилятор,
 # а не то, что подтягивается через cargo). См. README ниже про установку.
-inkwell = { version = "0.5", features = ["llvm18-0", "target-aarch64"] }
-
+#
+# ⚠️ НАЙДЕНО РЕАЛЬНОЙ ПРОВЕРКОЙ (сборка на Windows): inkwell по умолчанию
+# включает фичу "target-all", из-за которой генерируются методы
+# Target::initialize_arm/bpf/mips/... для ВСЕХ таргетов LLVM. Готовый пакет
+# LLVM для Windows (vovkos/llvm-package-windows) собран ТОЛЬКО с X86 — при
+# линковке это вываливается десятками "unresolved external symbol:
+# LLVMInitializeARMTarget" и т.п., хотя ни один из этих таргетов не нужен.
+# Поэтому default-features отключены, а таргеты включаются явно и раздельно
+# по платформе: на Windows доступен только X86, на остальных (macOS/Linux,
+# включая кросс-сборку под Android) дополнительно aarch64 — см. таблицы
+# ниже в этом файле.
+#
 # Для языкового сервера (src/bin/сфера_lsp.rs) — НЕ нужны компилятору
 # самому по себе (main.rs их не использует), но раз уж они в общем списке
 # зависимостей пакета, cargo build соберёт лишнее и для обычного
@@ -45,6 +55,15 @@ serde_json = "1.0"
 # всех платформ сразу сломало бы обычную сборку.
 [target.'cfg(target_os = "android")'.dependencies]
 llvm-sys = { version = "180.0.0", features = ["disable-alltargets-init"] }
+
+# inkwell — по платформе, см. подробный комментарий у [dependencies].
+# На Windows нет метода initialize_aarch64 (пакет LLVM без aarch64), и
+# codegen.rs в Windows-сборке его не вызывает — см. cfg-ветки там же.
+[target.'cfg(windows)'.dependencies]
+inkwell = { version = "0.5", default-features = false, features = ["llvm18-0", "target-x86"] }
+
+[target.'cfg(not(windows))'.dependencies]
+inkwell = { version = "0.5", default-features = false, features = ["llvm18-0", "target-x86", "target-aarch64"] }
 
 [profile.dev]
 opt-level = 0
